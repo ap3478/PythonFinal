@@ -106,6 +106,18 @@ class User(Base):
     calculations = relationship("Calculation", 
                                back_populates="user", 
                                cascade="all, delete-orphan")  # Delete user's calculations when user is deleted
+
+    # One-to-many: track every password change for this user (audit log).
+    # ``foreign_keys`` is required because ``PasswordChange`` has two FKs to
+    # ``users`` (the subject of the change and the actor who performed it).
+    password_changes = relationship(
+        "PasswordChange",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="PasswordChange.user_id",
+        order_by="desc(PasswordChange.changed_at)",
+    )
+    
     def __init__(self, *args, **kwargs):
         """Initialize a new user, handling password hashing if provided."""
         if "hashed_password" in kwargs:

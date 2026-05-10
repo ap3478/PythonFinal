@@ -1,0 +1,164 @@
+{% extends "layout.html" %}
+{% block title %}Profile{% endblock %}
+
+{% block content %}
+<div id="profileAlerts" class="space-y-2 mb-4"></div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+  <!-- Edit profile -->
+  <section class="bg-white shadow rounded-lg p-6 border border-gray-100">
+    <h2 class="text-xl font-bold text-gray-800 mb-4">My Profile</h2>
+    <form id="profileForm" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="profileFirstName">First name</label>
+        <input id="profileFirstName" name="first_name" type="text" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="profileLastName">Last name</label>
+        <input id="profileLastName" name="last_name" type="text" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="profileUsername">Username</label>
+        <input id="profileUsername" name="username" type="text" minlength="3" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="profileEmail">Email</label>
+        <input id="profileEmail" name="email" type="email" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <button id="profileSaveBtn" type="submit"
+              class="bg-blue-700 text-white px-5 py-2 rounded-md font-medium hover:bg-blue-800">
+        Save changes
+      </button>
+    </form>
+  </section>
+
+  <!-- Change password -->
+  <section class="bg-white shadow rounded-lg p-6 border border-gray-100">
+    <h2 class="text-xl font-bold text-gray-800 mb-4">Change Password</h2>
+    <form id="passwordForm" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="currentPassword">Current password</label>
+        <input id="currentPassword" name="current_password" type="password" minlength="8" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="newPassword">New password</label>
+        <input id="newPassword" name="new_password" type="password" minlength="8" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+        <p class="mt-1 text-xs text-gray-500">
+          At least 8 characters, with one uppercase, one lowercase, one digit, and one special character.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" for="confirmNewPassword">Confirm new password</label>
+        <input id="confirmNewPassword" name="confirm_new_password" type="password" minlength="8" required
+               class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 px-3" />
+      </div>
+      <button id="passwordSaveBtn" type="submit"
+              class="bg-blue-700 text-white px-5 py-2 rounded-md font-medium hover:bg-blue-800">
+        Update password
+      </button>
+    </form>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const token = localStorage.getItem('access_token');
+  if (!token) { window.location.href = '/login'; return; }
+
+  function showAlert(kind, msg) {
+    const wrap = document.getElementById('profileAlerts');
+    const cls = kind === 'error'
+      ? 'bg-red-100 border-red-500 text-red-800'
+      : 'bg-green-100 border-green-500 text-green-800';
+    const el = document.createElement('div');
+    el.id = kind === 'error' ? 'profileError' : 'profileSuccess';
+    el.className = `border ${cls} px-4 py-3 rounded-md`;
+    el.textContent = msg;
+    wrap.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+
+  // Load current profile
+  fetch('/users/me', { headers: { 'Authorization': `Bearer ${token}` } })
+    .then(r => {
+      if (r.status === 401) { localStorage.clear(); window.location.href = '/login'; return null; }
+      if (!r.ok) throw new Error('Failed to load profile');
+      return r.json();
+    })
+    .then(user => {
+      if (!user) return;
+      document.getElementById('profileFirstName').value = user.first_name || '';
+      document.getElementById('profileLastName').value = user.last_name || '';
+      document.getElementById('profileUsername').value = user.username || '';
+      document.getElementById('profileEmail').value = user.email || '';
+      localStorage.setItem('username', user.username);
+    })
+    .catch(err => showAlert('error', err.message));
+
+  // Save profile
+  document.getElementById('profileForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+      first_name: document.getElementById('profileFirstName').value.trim(),
+      last_name:  document.getElementById('profileLastName').value.trim(),
+      username:   document.getElementById('profileUsername').value.trim(),
+      email:      document.getElementById('profileEmail').value.trim(),
+    };
+    try {
+      const resp = await fetch('/users/me', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || 'Update failed');
+      localStorage.setItem('username', data.username);
+      showAlert('success', 'Profile updated.');
+    } catch (err) {
+      showAlert('error', err.message);
+    }
+  });
+
+  // Change password
+  document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+      current_password:     document.getElementById('currentPassword').value,
+      new_password:         document.getElementById('newPassword').value,
+      confirm_new_password: document.getElementById('confirmNewPassword').value,
+    };
+    if (body.new_password !== body.confirm_new_password) {
+      showAlert('error', 'New password and confirmation do not match.');
+      return;
+    }
+    try {
+      const resp = await fetch('/users/me/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || 'Password update failed');
+      showAlert('success', 'Password updated. Please log in again.');
+      document.getElementById('passwordForm').reset();
+      // Force re-login: clear local auth and bounce to /login after a beat.
+      setTimeout(() => {
+        localStorage.clear();
+        window.location.href = '/login';
+      }, 1500);
+    } catch (err) {
+      showAlert('error', err.message);
+    }
+  });
+});
+</script>
+{% endblock %}

@@ -9,3 +9,4 @@ from app.models.calculation import (  # noqa: F401
     SquareRoot,
 )
 from app.models.user import User  # noqa: F401
+from app.models.password_change import PasswordChange  # noqa: F401
