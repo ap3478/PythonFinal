@@ -1,11 +1,11 @@
 """
-FastAPI Main Application Module — Branch 2: Calculations BREAD
+FastAPI Main Application Module — Branch 4: Profile & Password Management
 
-Auth + the four basic operations (addition, subtraction, multiplication,
-division) plus power, modulus, and square_root via the polymorphic factory.
-Dashboard, view, and edit pages drive the BREAD endpoints from a browser.
+Builds on the auth + BREAD foundation by adding:
+- GET/PUT /users/me      — profile read and update
+- POST /users/me/change-password  — re-hash and write an audit row
 
-Profile/password/stats/admin endpoints land in subsequent branches.
+Stats and admin endpoints land in subsequent branches.
 """
 
 from contextlib import asynccontextmanager
@@ -19,10 +19,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.auth.dependencies import get_current_active_user
+from app.auth.dependencies import (
+    get_current_active_user,
+    get_current_user_db,
+)
 from app.models.calculation import Calculation
+from app.models.password_change import PasswordChange
 from app.models.user import User
 from app.schemas.calculation import (
     CalculationBase,
@@ -30,7 +35,13 @@ from app.schemas.calculation import (
     CalculationUpdate,
 )
 from app.schemas.token import TokenResponse
-from app.schemas.user import UserCreate, UserResponse, UserLogin
+from app.schemas.user import (
+    UserCreate,
+    UserResponse,
+    UserLogin,
+    UserUpdate,
+    PasswordUpdate,
+)
 from app.database import Base, get_db, engine
 
 
@@ -53,9 +64,6 @@ app = FastAPI(
 )
 
 
-# ----------------------------------------------------------------------------
-# Static + templates
-# ----------------------------------------------------------------------------
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -80,7 +88,6 @@ def register_page(request: Request):
 
 @app.get("/dashboard", response_class=HTMLResponse, tags=["web"])
 def dashboard_page(request: Request):
-    """Dashboard with new-calculation form and calculation history."""
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
 
@@ -96,6 +103,12 @@ def edit_calculation_page(request: Request, calc_id: str):
     return templates.TemplateResponse(
         "edit_calculation.html", {"request": request, "calc_id": calc_id}
     )
+
+
+@app.get("/profile", response_class=HTMLResponse, tags=["web"])
+def profile_page(request: Request):
+    """Profile page: edit username/email/name and change password."""
+    return templates.TemplateResponse("profile.html", {"request": request})
 
 
 # ----------------------------------------------------------------------------
@@ -176,6 +189,89 @@ def login_form(
 
 
 # ----------------------------------------------------------------------------
+# User profile
+# ----------------------------------------------------------------------------
+@app.get("/users/me", response_model=UserResponse, tags=["users"])
+def read_current_user(current_user: User = Depends(get_current_user_db)):
+    """Return the full profile of the authenticated user."""
+    return current_user
+
+
+@app.put("/users/me", response_model=UserResponse, tags=["users"])
+def update_current_user(
+    update: UserUpdate,
+    current_user: User = Depends(get_current_user_db),
+    db: Session = Depends(get_db),
+):
+    """Update first/last name, username, or email. Username/email collisions return 400."""
+    payload = update.model_dump(exclude_unset=True)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields provided to update",
+        )
+
+    new_username = payload.get("username")
+    new_email = payload.get("email")
+    if new_username or new_email:
+        conflict_q = db.query(User).filter(User.id != current_user.id)
+        clauses = []
+        if new_username:
+            clauses.append(User.username == new_username)
+        if new_email:
+            clauses.append(User.email == new_email)
+        if clauses and conflict_q.filter(or_(*clauses)).first() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username or email already in use",
+            )
+
+    for key, value in payload.items():
+        setattr(current_user, key, value)
+    current_user.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@app.post(
+    "/users/me/change-password",
+    status_code=status.HTTP_200_OK,
+    tags=["users"],
+)
+def change_password(
+    payload: PasswordUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user_db),
+    db: Session = Depends(get_db),
+):
+    """
+    Change the authenticated user's password.
+
+    Requires the current password as proof of identity. On success, writes a
+    PasswordChange audit record (user_id, IP, User-Agent, timestamp).
+    """
+    if not current_user.verify_password(payload.current_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+
+    current_user.password = User.hash_password(payload.new_password)
+    current_user.updated_at = datetime.now(timezone.utc)
+
+    audit = PasswordChange(
+        user_id=current_user.id,
+        changed_by_user_id=current_user.id,
+        ip_address=(request.client.host if request.client else None),
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.add(audit)
+    db.commit()
+    return {"detail": "Password updated successfully"}
+
+
+# ----------------------------------------------------------------------------
 # Calculations BREAD
 # ----------------------------------------------------------------------------
 @app.post(
@@ -189,7 +285,6 @@ def create_calculation(
     current_user=Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Create a new calculation. Computes and stores the result."""
     try:
         new_calculation = Calculation.create(
             calculation_type=calculation_data.type,
@@ -214,7 +309,6 @@ def list_calculations(
     current_user=Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """List calculations belonging to the current user."""
     return (
         db.query(Calculation)
         .filter(Calculation.user_id == current_user.id)
@@ -232,12 +326,10 @@ def get_calculation(
     current_user=Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Retrieve one calculation by UUID; must belong to the current user."""
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid calculation id format.")
-
     calculation = (
         db.query(Calculation)
         .filter(Calculation.id == calc_uuid, Calculation.user_id == current_user.id)
@@ -259,12 +351,10 @@ def update_calculation(
     current_user=Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Update a calculation's inputs and recompute its result."""
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid calculation id format.")
-
     calculation = (
         db.query(Calculation)
         .filter(Calculation.id == calc_uuid, Calculation.user_id == current_user.id)
@@ -293,12 +383,10 @@ def delete_calculation(
     current_user=Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a calculation owned by the current user."""
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid calculation id format.")
-
     calculation = (
         db.query(Calculation)
         .filter(Calculation.id == calc_uuid, Calculation.user_id == current_user.id)
@@ -306,7 +394,6 @@ def delete_calculation(
     )
     if not calculation:
         raise HTTPException(status_code=404, detail="Calculation not found.")
-
     db.delete(calculation)
     db.commit()
     return None
