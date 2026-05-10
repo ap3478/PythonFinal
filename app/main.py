@@ -42,6 +42,10 @@ from app.schemas.user import (
     UserUpdate,
     PasswordUpdate,
 )
+from app.schemas.reports import (
+    UserStatsResponse,
+    CalculationTypeBreakdown,
+)
 from app.database import Base, get_db, engine
 
 
@@ -109,6 +113,12 @@ def edit_calculation_page(request: Request, calc_id: str):
 def profile_page(request: Request):
     """Profile page: edit username/email/name and change password."""
     return templates.TemplateResponse("profile.html", {"request": request})
+
+
+@app.get("/stats", response_class=HTMLResponse, tags=["web"])
+def stats_page(request: Request):
+    """Personal usage stats / report page."""
+    return templates.TemplateResponse("stats.html", {"request": request})
 
 
 # ----------------------------------------------------------------------------
@@ -270,6 +280,75 @@ def change_password(
     db.commit()
     return {"detail": "Password updated successfully"}
 
+
+
+
+
+# ----------------------------------------------------------------------------
+# Per-user Stats / Report Endpoint
+# ----------------------------------------------------------------------------
+@app.get(
+    "/users/me/stats",
+    response_model=UserStatsResponse,
+    tags=["users"],
+)
+def my_stats(
+    current_user: User = Depends(get_current_user_db),
+    db: Session = Depends(get_db),
+):
+    """
+    Aggregate calculation statistics for the authenticated user.
+    Counts, per-type breakdown, average operands, and average result.
+    """
+    rows = (
+        db.query(Calculation)
+        .filter(Calculation.user_id == current_user.id)
+        .all()
+    )
+
+    total = len(rows)
+    if total == 0:
+        return UserStatsResponse(
+            total_calculations=0,
+            total_operands=0,
+            average_operands_per_calculation=0.0,
+            average_result=None,
+            breakdown=[],
+            most_used_type=None,
+            first_calculation_at=None,
+            last_calculation_at=None,
+        )
+
+    total_operands = sum(len(r.inputs or []) for r in rows)
+    results = [r.result for r in rows if r.result is not None]
+    avg_result = (sum(results) / len(results)) if results else None
+
+    by_type = {}
+    for r in rows:
+        by_type.setdefault(r.type, []).append(r)
+
+    breakdown = [
+        CalculationTypeBreakdown(
+            type=t,
+            count=len(items),
+            average_inputs=(sum(len(i.inputs or []) for i in items) / len(items)),
+            last_used_at=max(i.created_at for i in items),
+        )
+        for t, items in sorted(by_type.items(), key=lambda kv: -len(kv[1]))
+    ]
+
+    most_used_type = breakdown[0].type if breakdown else None
+
+    return UserStatsResponse(
+        total_calculations=total,
+        total_operands=total_operands,
+        average_operands_per_calculation=total_operands / total,
+        average_result=avg_result,
+        breakdown=breakdown,
+        most_used_type=most_used_type,
+        first_calculation_at=min(r.created_at for r in rows),
+        last_calculation_at=max(r.created_at for r in rows),
+    )
 
 # ----------------------------------------------------------------------------
 # Calculations BREAD
