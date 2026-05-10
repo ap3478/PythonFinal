@@ -11,20 +11,21 @@ Stats and admin endpoints land in subsequent branches.
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from uuid import UUID
-from typing import List
+from typing import List, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import (
     get_current_active_user,
     get_current_user_db,
+    get_current_admin_user,
 )
 from app.models.calculation import Calculation
 from app.models.password_change import PasswordChange
@@ -45,6 +46,10 @@ from app.schemas.user import (
 from app.schemas.reports import (
     UserStatsResponse,
     CalculationTypeBreakdown,
+    PasswordChangeResponse,
+    AdminCalculationResponse,
+    AdminUserResponse,
+    AdminStatsResponse,
 )
 from app.database import Base, get_db, engine
 
@@ -119,6 +124,12 @@ def profile_page(request: Request):
 def stats_page(request: Request):
     """Personal usage stats / report page."""
     return templates.TemplateResponse("stats.html", {"request": request})
+
+
+@app.get("/admin", response_class=HTMLResponse, tags=["web"])
+def admin_page(request: Request):
+    """Admin dashboard: all users, all calculations, password-change audit."""
+    return templates.TemplateResponse("admin.html", {"request": request})
 
 
 # ----------------------------------------------------------------------------
@@ -476,6 +487,163 @@ def delete_calculation(
     db.delete(calculation)
     db.commit()
     return None
+
+
+
+
+# ----------------------------------------------------------------------------
+# Admin Endpoints
+# ----------------------------------------------------------------------------
+@app.get(
+    "/admin/users",
+    response_model=List[AdminUserResponse],
+    tags=["admin"],
+)
+def admin_list_users(
+    _admin: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """List every user in the system. Admin only."""
+    rows = db.query(User).order_by(User.created_at.desc()).all()
+    out = []
+    for u in rows:
+        out.append(
+            AdminUserResponse(
+                id=u.id,
+                username=u.username,
+                email=u.email,
+                first_name=u.first_name,
+                last_name=u.last_name,
+                is_active=bool(u.is_active),
+                is_verified=bool(u.is_verified),
+                is_admin=bool(getattr(u, "is_admin", False)),
+                created_at=u.created_at,
+                updated_at=u.updated_at,
+                last_login=u.last_login,
+                calculation_count=(
+                    db.query(func.count(Calculation.id))
+                    .filter(Calculation.user_id == u.id)
+                    .scalar()
+                    or 0
+                ),
+            )
+        )
+    return out
+
+
+@app.get(
+    "/admin/calculations",
+    response_model=List[AdminCalculationResponse],
+    tags=["admin"],
+)
+def admin_list_calculations(
+    limit: int = Query(200, ge=1, le=1000),
+    user_id: Optional[UUID] = Query(None),
+    type: Optional[str] = Query(None),
+    _admin: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """List calculations from every user. Admin only. Filters: ?user_id=, ?type=, ?limit="""
+    q = (
+        db.query(Calculation, User.username, User.email)
+        .outerjoin(User, User.id == Calculation.user_id)
+    )
+    if user_id is not None:
+        q = q.filter(Calculation.user_id == user_id)
+    if type:
+        q = q.filter(Calculation.type == type.lower())
+    q = q.order_by(Calculation.created_at.desc()).limit(limit)
+
+    out = []
+    for calc, username, email in q.all():
+        out.append(
+            AdminCalculationResponse(
+                id=calc.id,
+                user_id=calc.user_id,
+                type=calc.type,
+                inputs=list(calc.inputs or []),
+                result=calc.result,
+                created_at=calc.created_at,
+                updated_at=calc.updated_at,
+                username=username,
+                email=email,
+            )
+        )
+    return out
+
+
+@app.get(
+    "/admin/password-changes",
+    response_model=List[PasswordChangeResponse],
+    tags=["admin"],
+)
+def admin_list_password_changes(
+    limit: int = Query(200, ge=1, le=1000),
+    user_id: Optional[UUID] = Query(None),
+    _admin: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """List password-change audit records across all users. Admin only."""
+    q = (
+        db.query(PasswordChange, User.username, User.email)
+        .outerjoin(User, User.id == PasswordChange.user_id)
+    )
+    if user_id is not None:
+        q = q.filter(PasswordChange.user_id == user_id)
+    q = q.order_by(PasswordChange.changed_at.desc()).limit(limit)
+
+    out = []
+    for change, username, email in q.all():
+        out.append(
+            PasswordChangeResponse(
+                id=change.id,
+                user_id=change.user_id,
+                changed_by_user_id=change.changed_by_user_id,
+                changed_at=change.changed_at,
+                ip_address=change.ip_address,
+                user_agent=change.user_agent,
+                username=username,
+                email=email,
+            )
+        )
+    return out
+
+
+@app.get(
+    "/admin/stats",
+    response_model=AdminStatsResponse,
+    tags=["admin"],
+)
+def admin_stats(
+    _admin: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """High-level system stats for the admin dashboard."""
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    active_users = (
+        db.query(func.count(User.id)).filter(User.is_active.is_(True)).scalar() or 0
+    )
+    admin_users = (
+        db.query(func.count(User.id)).filter(User.is_admin.is_(True)).scalar() or 0
+    )
+    total_calcs = db.query(func.count(Calculation.id)).scalar() or 0
+    total_pwd = db.query(func.count(PasswordChange.id)).scalar() or 0
+
+    by_type_rows = (
+        db.query(Calculation.type, func.count(Calculation.id))
+        .group_by(Calculation.type)
+        .all()
+    )
+    by_type = {t: int(c) for t, c in by_type_rows}
+
+    return AdminStatsResponse(
+        total_users=int(total_users),
+        active_users=int(active_users),
+        admin_users=int(admin_users),
+        total_calculations=int(total_calcs),
+        total_password_changes=int(total_pwd),
+        calculations_by_type=by_type,
+    )
 
 
 if __name__ == "__main__":
