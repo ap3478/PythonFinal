@@ -14,9 +14,19 @@ from .calculation import (
     CalculationUpdate,
     CalculationResponse,
 )
+from .reports import (
+    CalculationTypeBreakdown,
+    UserStatsResponse,
+    PasswordChangeResponse,
+    AdminCalculationResponse,
+    AdminUserResponse,
+    AdminStatsResponse,
+)
 
 __all__ = [
     'UserBase', 'UserCreate', 'UserResponse', 'UserLogin', 'UserUpdate', 'PasswordUpdate',
     'Token', 'TokenData', 'TokenResponse',
     'CalculationType', 'CalculationBase', 'CalculationCreate', 'CalculationUpdate', 'CalculationResponse',
+    'CalculationTypeBreakdown', 'UserStatsResponse', 'PasswordChangeResponse',
+    'AdminCalculationResponse', 'AdminUserResponse', 'AdminStatsResponse',
 ]
